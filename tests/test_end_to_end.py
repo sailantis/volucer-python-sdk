@@ -29,6 +29,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SDK_ROOT = Path(__file__).resolve().parents[1]
 WORKER = SDK_ROOT / "examples" / "wsgi_app.py"
@@ -57,6 +58,16 @@ def e2e_required() -> bool:
     skipped end-to-end test and a passing one are the same green.
     """
     return os.environ.get("VOLUCER_E2E") == "1"
+
+
+def should_run(has_binary: bool, required: bool) -> bool:
+    """Whether the end-to-end suite runs rather than skips.
+
+    A named function rather than an expression inside the decorator, because the expression
+    was written backwards once (``has_binary or not required``) and a decorator argument
+    cannot be tested. Only the case of *neither* a binary nor a requirement skips.
+    """
+    return has_binary or required
 
 
 def free_port() -> int:
@@ -90,7 +101,7 @@ def http_get(port: int, path: str) -> tuple[int, dict[str, str], bytes]:
 
 
 @unittest.skipUnless(
-    volucer_binary() or not e2e_required(),
+    should_run(volucer_binary() is not None, e2e_required()),
     "no volucer binary: set VOLUCER_BIN or build the server checkout",
 )
 class EndToEndTest(unittest.TestCase):
@@ -199,6 +210,42 @@ class EndToEndTest(unittest.TestCase):
             "the second request must not inherit the first one's query string",
         )
         self.assertEqual("/second", json.loads(second)["path"])
+
+
+class GuardTest(unittest.TestCase):
+    """The skip predicate, which was written backwards and shipped that way.
+
+    Worth a test of its own rather than a note, because it failed in the direction that looks
+    fine. With ``VOLUCER_E2E=1`` set — what CI does — and no binary, the old
+    ``volucer_binary() or not e2e_required()`` evaluated ``False or False`` and **skipped**.
+    A skipped end-to-end test is the same green as a passing one, so the CI job whose entire
+    purpose is to prove the protocol against the real server proved nothing. It never
+    surfaced because that job was already red for an unrelated reason.
+    """
+
+    def test_the_suite_runs_whenever_it_could_do_something(self) -> None:
+        # A binary: run, whether or not a skip would be tolerated.
+        self.assertTrue(should_run(True, False))
+        self.assertTrue(should_run(True, True))
+        # No binary but a skip is a failure: run, so setUpClass reports the missing binary.
+        self.assertTrue(should_run(False, True))
+
+    def test_the_suite_skips_only_when_there_is_nothing_to_do(self) -> None:
+        # The one permitted skip. The old predicate's inverse produced this answer for the
+        # `(False, True)` case above, which is the regression.
+        self.assertFalse(should_run(False, False))
+
+    def test_e2e_required_reads_the_variable_ci_sets(self) -> None:
+        with mock.patch.dict(os.environ, {"VOLUCER_E2E": "1"}):
+            self.assertTrue(e2e_required())
+        with mock.patch.dict(os.environ, {"VOLUCER_E2E": "0"}):
+            self.assertFalse(e2e_required(), "only 1 counts; 0 is not a requirement")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(e2e_required(), "unset is not a requirement")
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":

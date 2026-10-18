@@ -8,7 +8,22 @@ not these objects.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
+
+#: Whether `dataclass(slots=True)` exists, which is Python 3.10 and later.
+#:
+#: This package supports 3.9, where passing `slots=` to `dataclass()` is a `TypeError` at
+#: class-definition time -- so there it is not a missing optimisation, it is an import that
+#: fails. `slots` is worth having where it exists (these objects are allocated once per
+#: request and the attribute dict is pure overhead), so the decorator below is the
+#: conditional one rather than either dropping the feature or raising the floor.
+_HAS_SLOTS = sys.version_info >= (3, 10)
+
+
+def _slots_dataclass(cls):
+    """`@_slots_dataclass` where supported, `@dataclass` where it is not."""
+    return dataclass(cls, slots=True) if _HAS_SLOTS else dataclass(cls)
 from typing import Iterable
 from urllib.parse import parse_qsl
 
@@ -20,7 +35,7 @@ from urllib.parse import parse_qsl
 _REPEATABLE = frozenset({"set-cookie"})
 
 
-@dataclass(slots=True)
+@_slots_dataclass
 class Request:
     """One request, as it arrived on the channel.
 
@@ -98,7 +113,7 @@ class Request:
         return rest == "" or rest[0] in ";+-"
 
 
-@dataclass(slots=True)
+@_slots_dataclass
 class Response:
     """A response the SDK will send.
 
@@ -141,7 +156,7 @@ class Response:
         return self
 
 
-@dataclass(slots=True)
+@_slots_dataclass
 class Job:
     """One unit of queued work, as a consumer sees it.
 

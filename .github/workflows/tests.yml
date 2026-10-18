@@ -21,18 +21,30 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Unit and wire-format tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          # Named explicitly rather than `discover`: the end-to-end module is run below, where a
+          # real server exists. Discovering it here is what made the failure unreadable --
+          # `VOLUCER_E2E` is not set in this step, so with no binary it *skipped*, and a skipped
+          # job looks exactly like a passing one.
+          python -m unittest tests.test_wire_format tests.test_worker tests.test_wsgi -v
 
       # The end-to-end suite drives a real server, and it is a separate job rather than a
-      # step so that a build failure is reported as itself. The environment variable is what
-      # makes it fail rather than skip: a skipped end-to-end test and a passing one are the
-      # same green, which is the reason the server's own CI sets VOLUCER_E2E=1 too.
+      # step so that a build failure is reported as itself. VOLUCER_E2E=1 is what makes a
+      # missing binary a failure rather than a skip: a skipped end-to-end test and a passing
+      # one are the same green, which is the reason the server's own CI sets it too.
       - name: Check out the server beside the SDK
         if: matrix.python == '3.12'
         uses: actions/checkout@v4
         with:
           repository: sailantis/volucer
           path: volucer
+
+      # NASM and CMake are what `aws-lc-sys` needs to assemble its crypto code, and this workflow
+      # never installed them -- so the build step below could not have succeeded even if the
+      # end-to-end suite had been reached. The set mirrors the server's own CI.
+      - name: Install the server's build dependencies
+        if: matrix.python == '3.12'
+        run: sudo apt-get update && sudo apt-get install -y nasm cmake build-essential
 
       - name: Build the server
         if: matrix.python == '3.12'
@@ -41,6 +53,10 @@ jobs:
       - name: End-to-end against the real server
         if: matrix.python == '3.12'
         run: |
+          test -x "$PWD/volucer/target/debug/volucer" || {
+            echo "the server did not build, so there is nothing for the suite to talk to"
+            exit 1
+          }
           VOLUCER_BIN="$PWD/volucer/target/debug/volucer" \
           VOLUCER_E2E=1 \
           python -m unittest tests.test_end_to_end -v
