@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import unittest
 
+import volucer_worker
 from volucer_worker import protocol
 from volucer_worker.message import Response
 from volucer_worker.worker import Worker
@@ -495,6 +497,53 @@ class TransportTest(unittest.TestCase):
         os.environ[SOCKET_ENV] = "127.0.0.1:9999"
         self.assertEqual("127.0.0.1:9999", socket_address())
         os.environ.pop(SOCKET_ENV, None)
+
+class StdoutChannelTest(unittest.TestCase):
+    """Which stream `create()` uses, which is the difference between a worker and a hang.
+
+    Importing the package rebinds ``sys.stdout`` to a stream that writes to **stderr**, so
+    that an application's ``print`` cannot land inside a frame. ``create()`` must therefore
+    write frames to the *real* stdout, captured before that rebinding. It used
+    ``sys.stdout.buffer`` and that was a defect no Windows test could see: Windows runs the
+    socket transport, where the channel is a socket and ``sys.stdout`` is irrelevant, so the
+    handshake reached stderr and the server reported a startup timeout on Linux and macOS
+    only. Caught by running the end-to-end suite against a real Linux binary.
+    """
+
+    def test_the_guard_displaced_the_package_stdout(self) -> None:
+        # If this ever stops being true, the test below would pass for the wrong reason.
+        self.assertTrue(
+            getattr(sys.stdout, "_volucer_guard", False),
+            "importing the package must rebind sys.stdout, or stdout is still the channel",
+        )
+        self.assertFalse(
+            getattr(volucer_worker.real_stdout, "_volucer_guard", False),
+            "and the captured stream must be the one the guard displaced",
+        )
+
+    def test_frames_go_to_the_real_stdout_and_not_to_the_guard(self) -> None:
+        # `create()` with no arguments binds the process's own streams, so the object it
+        # stores is exactly the thing under test.
+        worker = Worker.create()
+        self.assertIs(
+            worker._out,
+            volucer_worker.real_stdout.buffer,
+            "the protocol channel is the real stdout's buffer",
+        )
+        self.assertIsNot(
+            worker._out,
+            sys.stdout.buffer,
+            "and explicitly not the guarded stream, which writes to stderr",
+        )
+
+    def test_a_diagnostic_never_reaches_the_protocol_stream(self) -> None:
+        # The point of the guard, asserted on the stream the worker actually writes to.
+        worker = Worker.create()
+        worker.diagnose("a diagnostic line")
+        self.assertFalse(
+            worker._out.closed,
+            "writing a diagnostic must not close or corrupt the channel",
+        )
 
 
 if __name__ == "__main__":

@@ -46,6 +46,22 @@ SOCKET_ENV = "VOLUCER_WORKER_SOCKET"
 #: The package name this SDK is, reported in `runtime`.
 PACKAGE = "volucer-worker-python"
 
+#: This process's real stdout, captured before `volucer_worker/__init__.py` replaces it.
+#:
+#: That replacement is the reason for this name existing at all. Importing the package
+#: rebinds ``sys.stdout`` to a stream that writes to *stderr*, so an application's ``print``
+#: cannot land inside a frame. The guard is installed at the bottom of ``__init__``, *after*
+#: this module is imported, so the binding below is the genuine stream — and it is the one
+#: ``create()`` must use.
+#:
+#: Using ``sys.stdout.buffer`` in ``create()`` was a defect that only the pipe transport
+#: exposed: the handshake and every response went to stderr, the server saw no ``HELLO_ACK``
+#: and reported a startup timeout, with "configuration loaded" as the last thing it logged.
+#: Windows defaults to the socket transport, so the channel is a socket there and
+#: ``sys.stdout`` is never consulted — which is why every measurement taken on Windows passed
+#: while Linux and macOS took the broken branch.
+real_stdout = sys.stdout
+
 
 def socket_address() -> str | None:
     """The socket to connect to, or None for stdio."""
@@ -154,12 +170,13 @@ class Worker:
     ) -> "Worker":
         """Build a worker on explicit streams, defaulting to stdio.
 
-        The protocol streams are taken from ``sys.stdout.buffer`` and ``sys.stdin.buffer``
-        *before* ``sys.stdout`` is rebound, which is the whole reason this is a class
-        method rather than a constructor call.
+        The output stream is ``real_stdout.buffer``, not ``sys.stdout.buffer``: importing this
+        package rebinds ``sys.stdout`` to a stream that writes to stderr (so an application's
+        ``print`` cannot land inside a frame), which means ``sys.stdout`` here is the *guard*
+        and using it would send every frame to stderr. See :data:`real_stdout`.
         """
         inp = inp if inp is not None else sys.stdin.buffer
-        out = out if out is not None else sys.stdout.buffer
+        out = out if out is not None else real_stdout.buffer
         err = err if err is not None else sys.stderr
         if track_memory:
             import tracemalloc

@@ -174,7 +174,19 @@ class EndToEndTest(unittest.TestCase):
                         + err.decode(errors="replace")
                     )
                 time.sleep(0.05)
-        raise AssertionError("the server never answered")
+        # The timeout used to say only "never answered", which is the least useful version of
+        # this failure: a server that is running and serving nothing looks identical to one
+        # that is misconfigured, and the only evidence was its stderr, which was discarded.
+        # The config is printed too, because the config is what the test writes.
+        cls.server.kill()
+        out, err = cls.server.communicate(timeout=10)
+        raise AssertionError(
+            "the server never answered within 30s\n"
+            f"--- command ---\n{binary} serve --config {config}\n"
+            f"--- config ---\n{config.read_text(encoding='utf-8')}\n"
+            f"--- stdout ---\n{out.decode(errors='replace')}\n"
+            f"--- stderr ---\n{err.decode(errors='replace')}"
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
