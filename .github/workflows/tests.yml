@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Unit and wire-format tests
+        run: python -m unittest discover -s tests -v
+
+      # The end-to-end suite drives a real server, and it is a separate job rather than a
+      # step so that a build failure is reported as itself. The environment variable is what
+      # makes it fail rather than skip: a skipped end-to-end test and a passing one are the
+      # same green, which is the reason the server's own CI sets VOLUCER_E2E=1 too.
+      - name: Check out the server beside the SDK
+        if: matrix.python == '3.12'
+        uses: actions/checkout@v4
+        with:
+          repository: sailantis/volucer
+          path: volucer
+
+      - name: Build the server
+        if: matrix.python == '3.12'
+        run: cargo build --manifest-path volucer/Cargo.toml
+
+      - name: End-to-end against the real server
+        if: matrix.python == '3.12'
+        run: |
+          VOLUCER_BIN="$PWD/volucer/target/debug/volucer" \
+          VOLUCER_E2E=1 \
+          python -m unittest tests.test_end_to_end -v
