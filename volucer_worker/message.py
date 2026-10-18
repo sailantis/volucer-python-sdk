@@ -8,22 +8,7 @@ not these objects.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
-
-#: Whether `dataclass(slots=True)` exists, which is Python 3.10 and later.
-#:
-#: This package supports 3.9, where passing `slots=` to `dataclass()` is a `TypeError` at
-#: class-definition time -- so there it is not a missing optimisation, it is an import that
-#: fails. `slots` is worth having where it exists (these objects are allocated once per
-#: request and the attribute dict is pure overhead), so the decorator below is the
-#: conditional one rather than either dropping the feature or raising the floor.
-_HAS_SLOTS = sys.version_info >= (3, 10)
-
-
-def _slots_dataclass(cls):
-    """`@_slots_dataclass` where supported, `@dataclass` where it is not."""
-    return dataclass(cls, slots=True) if _HAS_SLOTS else dataclass(cls)
 from typing import Iterable
 from urllib.parse import parse_qsl
 
@@ -35,7 +20,7 @@ from urllib.parse import parse_qsl
 _REPEATABLE = frozenset({"set-cookie"})
 
 
-@_slots_dataclass
+@dataclass(slots=True)
 class Request:
     """One request, as it arrived on the channel.
 
@@ -109,11 +94,11 @@ class Request:
         media_type = (self.content_type or "").strip().lower()
         if not media_type.startswith("application/grpc"):
             return False
-        rest = media_type[len("application/grpc") :]
+        rest = media_type.removeprefix("application/grpc")
         return rest == "" or rest[0] in ";+-"
 
 
-@_slots_dataclass
+@dataclass(slots=True)
 class Response:
     """A response the SDK will send.
 
@@ -156,7 +141,7 @@ class Response:
         return self
 
 
-@_slots_dataclass
+@dataclass(slots=True)
 class Job:
     """One unit of queued work, as a consumer sees it.
 

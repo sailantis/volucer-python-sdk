@@ -7,7 +7,7 @@ name = "volucer-worker"
 version = "0.1.0"
 description = "A Python worker SDK for the volucer worker protocol"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -29,4 +29,4 @@ volucer_worker = ["py.typed"]
 
 [tool.ruff]
 line-length = 96
-target-version = "py39"
+target-version = "py310"

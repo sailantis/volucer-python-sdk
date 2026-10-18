@@ -33,9 +33,9 @@ HTTP framing on the hot path.
 pip install git+https://github.com/sailantis/volucer-python-sdk
 ```
 
-Nothing is required at runtime beyond the standard library, and there are no optional
-dependencies. A worker SDK loads before an application's own environment is known to work,
-so a dependency here is a failure mode unrelated to the protocol.
+Python 3.10 or newer. Nothing is required at runtime beyond the standard library, and there
+are no optional dependencies. A worker SDK loads before an application's own environment is
+known to work, so a dependency here is a failure mode unrelated to the protocol.
 
 ## A worker, in three lines
 
