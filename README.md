@@ -51,6 +51,49 @@ Worker.connect().run(wsgi.call(application))
 `Worker.connect()` honours `VOLUCER_WORKER_SOCKET` and falls back to stdio. It is the call a
 worker file should make; `Worker.create()` is the explicit-streams form the tests use.
 
+## Django
+
+Django is a WSGI application, so there is nothing to adapt — `get_wsgi_application()` is the
+only Django-specific line:
+
+```python
+# worker.py
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myproject.settings")
+
+import django
+django.setup()
+
+from django.core.wsgi import get_wsgi_application
+from volucer_worker import Worker, wsgi
+
+Worker.connect().run(wsgi.call(get_wsgi_application()))
+```
+
+```toml
+[backends.django]
+kind    = "worker"
+command = "python worker.py"
+workers = 4
+
+[server]
+script_extensions = ["py"]   # else /worker.py is PATH_INFO, not a routed script
+```
+
+That is the whole integration. `django.setup()` belongs at import time because worker mode
+boots once; `get_wsgi_application()` must be called **after** it, not inside the handler.
+Database connection hygiene needs nothing from you — Django closes old connections on its own
+`request_started`/`request_finished` signals, which its WSGI handler fires per request.
+
+Verified against Django 6.1.2 and a real `volucer` binary: routing, `get_host()`,
+`build_absolute_uri()`, sessions in both directions, a cookieless client correctly getting no
+session, and two consecutive database queries.
+
+## Flask, FastAPI and everything else WSGI
+
+The same four lines. Flask, Bottle and Pyramid expose `app.wsgi_app` / `app` as WSGI callables.
+**FastAPI is ASGI, not WSGI** — see "What this SDK does not do" below.
+
 Point a backend at it:
 
 ```toml
@@ -174,6 +217,10 @@ are the same green.
   complete before it starts. That is a protocol property, not a missing feature here.
 - **Per-request state reset for your framework.** WSGI's per-request environment is rebuilt
   by the SDK, so that much is reset; a framework that keeps module-level state, an open
-  database connection or a cached container has to deal with that itself. The check that
-  matters is two consecutive requests that must not see each other's state, and
+  database connection or a cached container has to deal with that itself. **Django does not
+  need anything extra**: `django/db/__init__.py` connects `close_old_connections` to both
+  `request_started` and `request_finished`, and `WSGIHandler` fires both, so a transaction left
+  open by one view is closed before the next one runs — verified against a real `volucer`
+  binary by making a view abandon a transaction on purpose. The check that matters is two
+  consecutive requests that must not see each other's state, and
   `tests/test_end_to_end.py` asserts exactly that for the SDK's own surface.
