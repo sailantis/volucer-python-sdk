@@ -49,7 +49,94 @@ Worker.connect().run(wsgi.call(application))
 ```
 
 `Worker.connect()` honours `VOLUCER_WORKER_SOCKET` and falls back to stdio. It is the call a
-worker file should make; `Worker.create()` is the explicit-streams form the tests use.
+worker file should make; `Worker.create()` is the explicit-streams form, used when you are
+binding streams yourself — including when the connection was opened by somebody else, which
+is what the `attach` backend needs.
+
+## Attaching instead of spawning
+
+The `worker` backend starts your process. The `attach` backend does not: it *dials* a relay
+that a supervisor in your own process listens on, and holds one connection per slot. That is
+the shape that lets a supervisor fork its workers after booting the application once, so
+every child inherits the interpreter, the imported modules and the loaded code instead of
+paying for them again.
+
+The split matters: **volucer cannot own the fork.** It has to happen in the application's
+process, because the side that owns the listening socket has to be the side that owns the
+fork — and because `os.fork()` in a process that already has threads is not something a
+library can decide safely. So the fork lives in `volucer_worker.supervisor`, and you call it:
+
+```python
+# supervisor.py — boot once, then fork
+import django
+django.setup()
+
+from django.core.wsgi import get_wsgi_application
+from volucer_worker import supervisor, wsgi
+from myapp import application
+
+# Boot before the fork: whatever this closes over is inherited by every child.
+handler = wsgi.call(application)
+
+supervisor.serve("unix:/run/app/workers.sock", handler)
+```
+
+```toml
+[backends.python]
+kind    = "attach"
+relay   = "unix:/run/app/workers.sock"
+workers = 16
+```
+
+`children` caps how many workers may run at once, and the default (`0`) is **no cap**, which is
+what an `attach` deployment wants: volucer dials `workers` times at startup and holds one
+connection per slot, so the live children are already bounded by that number. A cap **below**
+`workers` is not a queue — the surplus dials sit unaccepted in the listen backlog while the pool
+waits for a handshake no child is there to send.
+
+Each child serves exactly one connection and exits. That is what makes recycling cheap — when
+`max_requests` is reached volucer closes the slot, the child sees end-of-file, exits, and the
+supervisor forks a replacement for the next connection. The supervisor reaps its children, so
+a long-lived one does not fill the process table with zombies.
+
+**Unix only.** `os.fork()` does not exist on Windows, and `supervisor.serve()` raises there
+rather than silently running a single process. Use `kind = "worker"` or `kind = "upstream"` on
+Windows.
+
+**Boot before the fork, connect after it.** A framework, a container and imported modules are
+inherited by every child, which is the saving. An *open connection* must not be: every child
+would inherit the socket and they would take turns reading from it. Open connections lazily,
+per child, on the first request — Django and SQLAlchemy both do this already.
+
+### Writing a supervisor yourself
+
+`supervisor.serve()` is a convenience, not the contract. What `attach` needs from any
+supervisor is that it serves a connection **it** opened, which is `Worker.create`:
+
+```python
+import socket
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 9700))
+listener.listen(64)
+
+while True:
+    connection, _ = listener.accept()
+    child = os.fork()
+    if child:
+        connection.close()          # the master must drop its copy
+        continue
+    listener.close()
+    Worker.create(                 # not connect(): the connection already exists
+        connection.makefile("rb", buffering=0),
+        connection.makefile("wb", buffering=0),
+    ).run(handler)
+    os._exit(0)
+```
+
+The `makefile` calls are not optional — a `socket` has neither `read` nor `write`, which is
+what the worker calls on its streams. Passing the raw socket, as a PHP worker can with its
+file-like streams, fails with `AttributeError`.
 
 ## Django
 
@@ -224,3 +311,6 @@ are the same green.
   binary by making a view abandon a transaction on purpose. The check that matters is two
   consecutive requests that must not see each other's state, and
   `tests/test_end_to_end.py` asserts exactly that for the SDK's own surface.
+- **Forking on Windows.** `supervisor.serve()` needs `os.fork()`. The platform without it is
+  served by `kind = "worker"` or `kind = "upstream"`, and the end-to-end suite proves the
+  `attach` contract on Windows with a threaded supervisor instead.

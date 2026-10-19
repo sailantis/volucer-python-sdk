@@ -224,6 +224,364 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual("/second", json.loads(second)["path"])
 
 
+ATTACH_SUPERVISOR = '''\
+"""An `attach` supervisor for the platforms without `fork`, using a thread.
+
+The SDK's real supervisor is :mod:`volucer_worker.supervisor`, covered by
+`SupervisorEndToEndTest`. This fixture exists so the *contract* — serving a connection
+somebody else opened — is proven on Windows too, where `os.fork()` does not exist.
+
+volucer only dials the relay in this mode and creates no process at all, because the side
+that owns the listening socket has to be the side that owns the fork.
+"""
+
+import os
+import socket
+import sys
+import threading
+
+sys.path.insert(0, {sdk!r})
+
+from volucer_worker import Response, Worker  # noqa: E402
+
+port = int(sys.argv[1])
+log = sys.argv[2]
+
+
+def note(line):
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(line + "\\n")
+
+
+def serve(connection):
+    try:
+        # `makefile`, because the worker reads and writes *file-like* streams and a socket is
+        # not one: `read` and `write` are what the SDK calls. This is the one Python-specific
+        # line a supervisor needs, and copying the PHP example without it fails with
+        # `AttributeError: 'socket' object has no attribute 'read'`.
+        Worker.create(
+            connection.makefile("rb", buffering=0),
+            connection.makefile("wb", buffering=0),
+        ).run(lambda request, worker: Response.text("attach " + request.uri + "\\n"))
+        note("clean")
+    except BaseException as error:  # noqa: BLE001 - the point is to report anything
+        note("raised " + type(error).__name__ + ": " + str(error))
+    finally:
+        connection.close()
+
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", port))
+listener.listen(64)
+note("ready")
+
+while True:
+    connection, _ = listener.accept()
+    note("accepted")
+    # A thread, not a fork: this fixture exists for the platforms that have no `fork`, so it
+    # must work there. The fork itself is covered by the SDK's own supervisor, below.
+    threading.Thread(target=serve, args=(connection,), daemon=True).start()
+'''
+
+#: A supervisor that drives the SDK's own `supervisor.serve`, with a handler that reports
+#: the child that served. Run in a subprocess so the fork does not inherit the test runner.
+SDK_SUPERVISOR = '''\
+"""Drive `volucer_worker.supervisor.serve` with a handler that names its child."""
+
+import os
+import sys
+
+sys.path.insert(0, {sdk!r})
+
+from volucer_worker import Response, supervisor  # noqa: E402
+
+relay = sys.argv[1]
+log = sys.argv[2]
+
+
+def note(line):
+    # Appended with `open(..., "a")` rather than written through a buffered stream: a forked
+    # child would otherwise re-emit whatever the master had buffered.
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(line + "\\n")
+
+
+def handler(request, worker):
+    return Response.text("attach " + request.uri + " pid=" + str(os.getpid()) + "\\n")
+
+
+if __name__ == "__main__":
+    note("ready")
+    supervisor.serve(relay, handler, children=2)
+'''
+
+
+@unittest.skipUnless(
+    should_run(volucer_binary() is not None, e2e_required()),
+    "no volucer binary: set VOLUCER_BIN or build the server checkout",
+)
+class AttachEndToEndTest(unittest.TestCase):
+    """The `attach` shape: volucer dials a relay somebody else listens on.
+
+    Every other end-to-end test here drives `kind = "worker"`, where volucer spawns the
+    process and owns its stdio — the one case an `attach` deployment never uses. This is the
+    test that proves `create()` works on a connection the SDK did **not** open, which is the
+    whole of what `attach` asks of an SDK.
+
+    The supervisor is a fixture here rather than :mod:`volucer_worker.supervisor`, on purpose:
+    it uses a thread instead of a fork, so this class covers the SDK's contract on every
+    platform. `SupervisorEndToEndTest` below covers the fork itself, where the platform has
+    one.
+
+    `max_requests = 2` is deliberate: it makes recycling observable inside one server run,
+    without which the test would only ever exercise the first connection.
+    """
+
+    supervisor_script = ATTACH_SUPERVISOR
+    extra_args: tuple[str, ...] = ()
+    body_prefix = b"attach "
+    workers = 1
+
+    server: subprocess.Popen | None = None
+    supervisor: subprocess.Popen | None = None
+    port = 0
+    relay = 0
+    root: tempfile.TemporaryDirectory | None = None
+    log = Path()
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        binary = volucer_binary()
+        if binary is None:
+            raise AssertionError(
+                "VOLUCER_E2E=1 but no volucer binary was found; set VOLUCER_BIN"
+            )
+        cls.root = tempfile.TemporaryDirectory(prefix="volucer-py-attach-")
+        root = Path(cls.root.name)
+        (root / "app.py").write_text("# served by the attached worker\n", encoding="utf-8")
+
+        cls.log = root / "supervisor.log"
+        cls.port = free_port()
+        cls.relay = free_port()
+
+        supervisor_script = root / "supervisor.py"
+        supervisor_script.write_text(
+            cls.supervisor_script.format(sdk=str(SDK_ROOT)), encoding="utf-8"
+        )
+        cls.supervisor = subprocess.Popen(
+            [
+                sys.executable,
+                str(supervisor_script),
+                str(cls.relay),
+                str(cls.log),
+                *cls.extra_args,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        # The listener has to exist before volucer starts, or the backend fails at startup
+        # with "could not connect to its relay" — which is correct behaviour and a confusing
+        # test failure, so readiness is waited for rather than raced.
+        cls.wait_for_log("ready", cls.supervisor, "the supervisor")
+
+        config = root / "volucer.toml"
+        config.write_text(
+            "\n".join(
+                [
+                    'default_backend = "py"',
+                    "[server]",
+                    f'http = "127.0.0.1:{cls.port}"',
+                    f'document_root = "{root.as_posix()}"',
+                    'front_controller = "app.py"',
+                    'script_extensions = ["py"]',
+                    "",
+                    "[backends.py]",
+                    'kind = "attach"',
+                    f'relay = "127.0.0.1:{cls.relay}"',
+                    f"workers = {cls.workers}",
+                    "max_requests = 2",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cls.server = subprocess.Popen(
+            [binary, "serve", "--config", str(config)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                http_get(cls.port, "/health")
+                return
+            except OSError:
+                if cls.server.poll() is not None:
+                    out, err = cls.server.communicate(timeout=5)
+                    raise AssertionError(
+                        "the server exited before answering:\n"
+                        + out.decode(errors="replace")
+                        + err.decode(errors="replace")
+                    )
+                time.sleep(0.05)
+        cls.server.kill()
+        out, err = cls.server.communicate(timeout=10)
+        raise AssertionError(
+            "the server never answered within 30s\n"
+            f"--- config ---\n{config.read_text(encoding='utf-8')}\n"
+            f"--- supervisor log ---\n{cls.log.read_text(encoding='utf-8')}\n"
+            f"--- stdout ---\n{out.decode(errors='replace')}\n"
+            f"--- stderr ---\n{err.decode(errors='replace')}"
+        )
+
+    @classmethod
+    def wait_for_log(cls, needle: str, process: subprocess.Popen | None, what: str) -> None:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if cls.log.is_file() and needle in cls.log.read_text(encoding="utf-8"):
+                return
+            if process is not None and process.poll() is not None:
+                _, err = process.communicate(timeout=5)
+                raise AssertionError(
+                    f"{what} exited before saying {needle!r}:\n"
+                    + err.decode(errors="replace")
+                )
+            time.sleep(0.05)
+        raise AssertionError(f"{what} never said {needle!r}")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        # volucer first: closing its slots is how the supervisor's children are asked to
+        # stop, so the other order would strand them mid-request — and a stranded child keeps
+        # the supervisor's stderr pipe open, which `communicate` would then wait on forever.
+        for process in (cls.server, cls.supervisor):
+            if process is None:
+                continue
+            process.terminate()
+            try:
+                # `wait`, not `communicate`: a forked child inherits these pipes, so the
+                # read end does not see EOF when the master exits. Waiting for the process
+                # itself is the question being asked.
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if cls.root is not None:
+            cls.root.cleanup()
+
+    def test_a_request_reaches_the_attached_worker(self) -> None:
+        status, _, body = http_get(self.port, "/hello")
+        self.assertEqual(200, status, body)
+        self.assert_body("/hello", body)
+
+    def assert_body(self, path: str, body: bytes) -> None:
+        """The exact body this class's supervisor answers with."""
+        self.assertEqual(self.body_prefix + path.encode() + b"\n", body)
+
+    def assert_recycle_evidence(self) -> None:
+        """The evidence that the recycle was a reconnect rather than a lucky retry.
+
+        Overridden by each supervisor: the fixture reports its own log lines, while the SDK
+        supervisor reports a pid per child. Both answer the same question — did volucer *dial
+        again*, and did the worker it left behind exit cleanly?
+        """
+        self.wait_for_log("accepted", self.supervisor, "the supervisor")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if "clean" in self.log.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.05)
+        lines = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("raised", lines, f"the worker did not exit cleanly:\n{lines}")
+        self.assertIn("clean", lines, f"the worker never reported a clean exit:\n{lines}")
+        self.assertGreaterEqual(
+            lines.count("accepted"),
+            2,
+            f"recycling did not dial the relay again:\n{lines}",
+        )
+
+    def test_recycling_reconnects_and_the_supervisor_exits_cleanly(self) -> None:
+        # Four requests over `max_requests = 2` means two connections: requests one and two
+        # share the first, three and four use the one volucer dials after closing it. A
+        # broken recycle shows up as a failed third request rather than as a subtle drift.
+        for index in range(4):
+            status, _, body = http_get(self.port, f"/r{index}")
+            self.assertEqual(200, status, body)
+            self.assert_body(f"/r{index}", body)
+
+        self.assert_recycle_evidence()
+
+
+@unittest.skipUnless(
+    should_run(volucer_binary() is not None, e2e_required()) and hasattr(os, "fork"),
+    "the supervisor needs os.fork(); set VOLUCER_BIN and run on Unix",
+)
+class SupervisorEndToEndTest(AttachEndToEndTest):
+    """The SDK's own prefork supervisor, which is the half `attach` needs on Unix.
+
+    Separate from `AttachEndToEndTest` because it is the *fork* under test rather than the
+    plumbing around it: the fixture there is a thread, so it works on Windows, and this one
+    cannot. Every request is served by a different child, which is the property that makes
+    `attach` cheaper than `worker` — one boot, shared copy-on-write.
+    """
+
+    supervisor_script = SDK_SUPERVISOR
+    body_prefix = b"attach "
+    workers = 2
+
+    def assert_body(self, path: str, body: bytes) -> None:
+        """The SDK supervisor's body, which appends the serving child's pid.
+
+        A prefix plus a pid rather than an exact string, because the pid is the evidence this
+        class is about: it is how "a different child served each connection" becomes observable
+        from outside the server.
+        """
+        prefix, _, tail = body.partition(b" pid=")
+        self.assertEqual(self.body_prefix + path.encode() + b"\n", prefix + b"\n", body)
+        self.assertTrue(tail.strip().isdigit(), f"no pid in the body: {body!r}")
+
+    def assert_recycle_evidence(self) -> None:
+        """The SDK supervisor's evidence: distinct child pids across the recycle.
+
+        `max_requests = 2` over four requests means volucer dialled twice, so at least two
+        children must have served. A supervisor that never re-forked would show one pid, and
+        one that leaked would show a zombie rather than a live child.
+        """
+        pids = set()
+        for index in range(4, 8):
+            status, _, body = http_get(self.port, f"/again{index}")
+            self.assertEqual(200, status, body)
+            pids.add(body.decode().split("pid=")[1].strip())
+        self.assertGreater(len(pids), 1, f"the supervisor stopped forking: {pids}")
+
+    def test_each_request_is_served_by_a_different_child(self) -> None:
+        pids = set()
+        for index in range(6):
+            status, _, body = http_get(self.port, f"/pid{index}")
+            self.assertEqual(200, status, body)
+            pids.add(body.decode().split("pid=")[1].strip())
+
+        # One connection per child, because volucer's `workers = 2` dials twice and each
+        # `accept()` forks. A pool that reused one child would show one pid here, and that
+        # would mean the supervisor is queueing rather than forking.
+        self.assertGreater(len(pids), 1, f"every request was served by the same child: {pids}")
+
+    def test_no_child_is_left_as_a_zombie(self) -> None:
+        # The zombie is the failure mode a fork-and-forget supervisor has: one per connection,
+        # invisible until the process table fills. `ps` is the only honest witness.
+        for index in range(6):
+            http_get(self.port, f"/z{index}")
+        time.sleep(1)
+
+        states = subprocess.run(
+            ["ps", "-o", "stat=", "--ppid", str(self.supervisor.pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        self.assertNotIn("Z", states, f"the supervisor left zombies behind: {states}")
+
+
 class GuardTest(unittest.TestCase):
     """The skip predicate, which was written backwards and shipped that way.
 

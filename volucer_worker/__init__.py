@@ -10,6 +10,13 @@ The ordinary use is three lines::
 
     Worker.connect().run(wsgi.call(application))
 
+For an `attach` backend — where volucer dials a relay instead of spawning a process — the
+supervisor half is here too::
+
+    from volucer_worker import supervisor, wsgi
+
+    supervisor.serve("unix:/run/app/workers.sock", wsgi.call(application), children=16)
+
 Importing this package **rebinds ``sys.stdout``**, and that is deliberate rather than
 surprising once the reason is known: the worker protocol uses the child process's stdout
 as its channel, so anything an application prints would land inside a frame and
@@ -25,7 +32,7 @@ import sys
 from .message import Job, Request, Response
 from .protocol import ProtocolError
 from .worker import Worker, real_stdout, runtime, socket_address
-from . import grpc, wsgi
+from . import grpc, supervisor, wsgi
 
 __version__ = "0.1.0"
 
@@ -39,6 +46,7 @@ __all__ = [
     "runtime",
     "real_stdout",
     "socket_address",
+    "supervisor",
     "wsgi",
     "__version__",
 ]
