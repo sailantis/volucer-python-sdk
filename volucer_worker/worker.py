@@ -43,6 +43,18 @@ from .protocol import ProtocolError
 #: space and connecting to it would be a confusing failure rather than the obvious one.
 SOCKET_ENV = "VOLUCER_WORKER_SOCKET"
 
+#: The environment variable naming the relay an `attach` backend dials.
+#:
+#: The counterpart of :data:`SOCKET_ENV`, and for the same purpose: one address both halves of a
+#: deployment must agree on, written once. The difference is direction. ``SOCKET_ENV`` is set *by*
+#: the server, on a child it spawned, so a supervisor cannot use it — there is no spawned child,
+#: and the value there would be whatever an enclosing environment happened to leave. This one is
+#: set by the *operator*, in the unit file or the container environment, and both the server's
+#: ``relay`` and :func:`volucer_worker.supervisor.serve` read it.
+#:
+#: Absent, empty or whitespace means unset, for the same reason ``SOCKET_ENV`` does.
+RELAY_ENV = "VOLUCER_RELAY_SOCKET"
+
 #: The package name this SDK is, reported in `runtime`.
 PACKAGE = "volucer-worker-python"
 

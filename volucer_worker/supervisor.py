@@ -43,7 +43,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from .worker import Worker
+from .worker import RELAY_ENV, Worker
 
 #: The `unix:` prefix volucer's configuration uses for a path relay.
 UNIX_PREFIX = "unix:"
@@ -65,6 +65,33 @@ def relay_path(relay: str) -> str | None:
     if relay.startswith(UNIX_PREFIX):
         return relay[len(UNIX_PREFIX) :]
     return None
+
+
+def relay_value(relay: str | None = None) -> str | None:
+    """The relay to listen on: the argument, else the environment, else ``None``.
+
+    ``None`` rather than an exception, because whether a missing relay is an error depends on
+    the caller. :func:`serve` turns it into a startup failure naming both places; a test or an
+    embedding application may want to decide for itself.
+
+    The trimming rule is :func:`volucer_worker.worker.socket_address`'s, deliberately: an empty
+    value is what a shell produces from ``VOLUCER_RELAY_SOCKET=``, and reporting it as an empty
+    address would send the operator looking for a typo in a file that never mentions the key.
+
+    Named ``relay_value`` rather than ``relay`` so it does not shadow the local that every
+    function here already calls ``relay`` — a module-level function and a parameter of the same
+    name is the kind of collision that reads fine and fails confusingly.
+    """
+    if relay is not None:
+        relay = relay.strip()
+        if relay:
+            return relay
+
+    address = os.environ.get(RELAY_ENV)
+    if address is None:
+        return None
+    address = address.strip()
+    return address or None
 
 
 def listen(relay: str) -> socket.socket:
@@ -99,7 +126,7 @@ def listen(relay: str) -> socket.socket:
 
 
 def serve(
-    relay: str,
+    relay: str | None,
     handler: Callable[[Any, Worker], Any],
     *,
     children: int = 0,
@@ -108,6 +135,12 @@ def serve(
 
     ``handler`` is the same callable :meth:`Worker.run` takes, so a WSGI application is
     ``wsgi.call(application)``.
+
+    ``relay`` may be ``None``, in which case :func:`relay_value` reads
+    ``VOLUCER_RELAY_SOCKET``. That is
+    the form a deployment should use: the server reads the same variable for its ``relay``, so
+    the address is written once instead of in two files that nothing keeps in sync. A value
+    passed here still wins, so a script that names its own socket keeps meaning what it says.
 
     ``children`` caps how many children may run at once, not a queue depth. ``0`` — the
     default — means **no cap**, which is what an ``attach`` deployment wants: volucer dials the
@@ -134,8 +167,18 @@ def serve(
     if children < 0:
         raise ValueError(f"children must be 0 (no cap) or greater, got {children}")
 
+    # Resolved before the fork, so a missing address is one startup error rather than one per
+    # child — and so `listen` is never handed `None`.
+    address = relay_value(relay)
+    if address is None:
+        raise ValueError(
+            "no relay to listen on: pass one to supervisor.serve(), or set "
+            f"{RELAY_ENV} — the same variable the server reads for its `relay`, "
+            'e.g. "unix:/run/app/workers.sock"'
+        )
+
     limit = children if children > 0 else None
-    listener = listen(relay)
+    listener = listen(address)
 
     stopping = False
 
@@ -147,7 +190,7 @@ def serve(
 
     _on_termination(request_stop)
 
-    _announce(relay, limit)
+    _announce(address, limit)
 
     live: set[int] = set()
     try:
@@ -181,7 +224,7 @@ def serve(
             _serve_one(connection, handler)
     finally:
         listener.close()
-        path = relay_path(relay)
+        path = relay_path(address)
         if path is not None:
             try:
                 os.unlink(path)
@@ -295,4 +338,4 @@ def _announce(relay: str, children: int | None) -> None:
         pass
 
 
-__all__ = ["serve", "listen", "relay_path", "UNIX_PREFIX"]
+__all__ = ["serve", "listen", "relay_path", "relay_value", "UNIX_PREFIX", "RELAY_ENV"]

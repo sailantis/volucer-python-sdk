@@ -31,6 +31,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# The package itself, for the tests that need no binary: importing it is safe on every platform —
+# `supervisor` only refuses when `serve()` is called, not when it is imported.
+from volucer_worker import supervisor  # noqa: E402
+
 SDK_ROOT = Path(__file__).resolve().parents[1]
 WORKER = SDK_ROOT / "examples" / "wsgi_app.py"
 
@@ -580,6 +584,51 @@ class SupervisorEndToEndTest(AttachEndToEndTest):
             text=True,
         ).stdout.split()
         self.assertNotIn("Z", states, f"the supervisor left zombies behind: {states}")
+
+
+class RelayResolutionTest(unittest.TestCase):
+    """Where the supervisor's relay address comes from.
+
+    Needs no `fork` and no socket, so it runs on every platform — which matters, because the
+    rule it covers is the one a deployment relies on and Windows is where a mistyped unit file
+    is most likely to be found.
+    """
+
+    def test_the_argument_wins_over_the_environment(self) -> None:
+        with mock.patch.dict(os.environ, {supervisor.RELAY_ENV: "unix:/from-env.sock"}):
+            self.assertEqual("unix:/from-arg.sock", supervisor.relay_value("unix:/from-arg.sock"))
+
+    def test_the_environment_is_the_fallback(self) -> None:
+        with mock.patch.dict(os.environ, {supervisor.RELAY_ENV: "  unix:/from-env.sock  "}):
+            self.assertEqual("unix:/from-env.sock", supervisor.relay_value(None))
+            self.assertEqual(
+                "unix:/from-env.sock",
+                supervisor.relay_value("   "),
+                "a blank argument is absent, not an address",
+            )
+
+    def test_neither_place_set_is_none(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(supervisor.relay_value(None))
+
+    def test_an_empty_value_means_unset(self) -> None:
+        # `Environment=VOLUCER_RELAY_SOCKET=` in a unit file and a shell's
+        # `export VOLUCER_RELAY_SOCKET=` both produce this, and reporting it as an empty
+        # address would send the operator looking for a typo in a file that never mentions it.
+        with mock.patch.dict(os.environ, {supervisor.RELAY_ENV: "   "}):
+            self.assertIsNone(supervisor.relay_value(None))
+
+    @unittest.skipUnless(hasattr(os, "fork"), "serve() refuses Windows for the missing fork first")
+    def test_serve_refuses_a_missing_relay_by_name(self) -> None:
+        # Checked before `listen` touches the filesystem, so the message is what the operator
+        # sees rather than a connect failure naming a path nobody wrote.
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            supervisor, "listen"
+        ) as listen:
+            with self.assertRaises(ValueError) as caught:
+                supervisor.serve(None, lambda request, worker: None)
+            self.assertIn(supervisor.RELAY_ENV, str(caught.exception))
+            listen.assert_not_called()
 
 
 class GuardTest(unittest.TestCase):

@@ -78,15 +78,28 @@ from myapp import application
 # Boot before the fork: whatever this closes over is inherited by every child.
 handler = wsgi.call(application)
 
-supervisor.serve("unix:/run/app/workers.sock", handler)
+supervisor.serve(None, handler)     # or "unix:/run/app/workers.sock"
 ```
 
 ```toml
 [backends.python]
 kind    = "attach"
-relay   = "unix:/run/app/workers.sock"
 workers = 16
 ```
+
+**The address can be written once.** With `None` as the first argument the supervisor reads
+`VOLUCER_RELAY_SOCKET`, and so does the server when `relay` is omitted:
+
+```ini
+# the unit file, or a container's environment
+Environment=VOLUCER_RELAY_SOCKET=unix:/run/app/workers.sock
+```
+
+That is the counterpart of `VOLUCER_WORKER_SOCKET`, for the mirror-image reason: that one is set
+*by* the server on a child it spawned, so a supervisor cannot read it — no child was spawned. This
+one is set by the operator, and both sides read it. A value passed to `serve()`, or a `relay` key in
+the file, still wins, so a stale variable cannot move a deployment. `supervisor.relay_value()` is
+that resolution on its own.
 
 `children` caps how many workers may run at once, and the default (`0`) is **no cap**, which is
 what an `attach` deployment wants: volucer dials `workers` times at startup and holds one
