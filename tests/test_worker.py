@@ -498,6 +498,30 @@ class TransportTest(unittest.TestCase):
         self.assertEqual("127.0.0.1:9999", socket_address())
         os.environ.pop(SOCKET_ENV, None)
 
+    def test_a_unix_address_is_a_path_and_a_tcp_address_is_not(self) -> None:
+        """The whole of the transport decision on the worker side.
+
+        ``connect()`` branches on :func:`unix_path` and nothing else, so the interesting
+        cases are about the string — a prefix absent, present, or present with nothing
+        after it — and they need no socket for the same reason ``socket_address`` does not.
+
+        ``unix:`` with no path returns ``''`` rather than ``None`` on purpose: ``None``
+        means "use stdio", and a server that sent ``unix:`` sent a broken address, not an
+        instruction to fall back. The connection then fails and says so on stderr, which on
+        the socket transport is the only channel a worker has.
+        """
+        from volucer_worker.worker import unix_path
+
+        cases = [
+            ("unix:/run/volucer/worker.0.sock", "/run/volucer/worker.0.sock"),
+            ("127.0.0.1:18400", None),
+            ("localhost:9000", None),
+            ("unix:", ""),
+        ]
+        for given, want in cases:
+            self.assertEqual(want, unix_path(given), f"unix_path({given!r})")
+
+
 class StdoutChannelTest(unittest.TestCase):
     """Which stream `create()` uses, which is the difference between a worker and a hang.
 

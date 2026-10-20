@@ -43,6 +43,13 @@ from .protocol import ProtocolError
 #: space and connecting to it would be a confusing failure rather than the obvious one.
 SOCKET_ENV = "VOLUCER_WORKER_SOCKET"
 
+#: The prefix volucer's configuration uses for a unix socket address.
+#:
+#: The same string :data:`volucer_worker.supervisor.UNIX_PREFIX` holds, and deliberately a
+#: separate constant: one side dials and the other listens, and either moving without the
+#: other is a bug worth being able to see.
+UNIX_PREFIX = "unix:"
+
 #: The environment variable naming the relay an `attach` backend dials.
 #:
 #: The counterpart of :data:`SOCKET_ENV`, and for the same purpose: one address both halves of a
@@ -82,6 +89,22 @@ def socket_address() -> str | None:
         return None
     address = address.strip()
     return address or None
+
+
+def unix_path(address: str) -> str | None:
+    """The filesystem path of a ``unix:`` address, or None for a TCP one.
+
+    The same convention volucer's configuration uses for ``external.socket``,
+    ``attach.relay`` and a worker's ``socket`` key, so this reads the rule rather than
+    inventing a fourth spelling. A loopback TCP address is ``host:port`` and has no
+    prefix, which is why the absence of one is the whole test.
+
+    Separate from :meth:`Worker.connect` so the decision is testable without a live
+    listener: every interesting case is about the string.
+    """
+    if not address.startswith(UNIX_PREFIX):
+        return None
+    return address[len(UNIX_PREFIX) :]
 
 
 def runtime() -> str:
@@ -221,8 +244,14 @@ class Worker:
         import socket
 
         try:
-            host, _, port = address.rpartition(":")
-            connection = socket.create_connection((host or "127.0.0.1", int(port)), timeout=10.0)
+            path = unix_path(address)
+            if path is not None:
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connection.settimeout(10.0)
+                connection.connect(path)
+            else:
+                host, _, port = address.rpartition(":")
+                connection = socket.create_connection((host or "127.0.0.1", int(port)), timeout=10.0)
             connection.settimeout(None)
         except (OSError, ValueError) as error:
             # The address is the server's, so a failure here is a deployment problem and it

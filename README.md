@@ -53,6 +53,18 @@ worker file should make; `Worker.create()` is the explicit-streams form, used wh
 binding streams yourself — including when the connection was opened by somebody else, which
 is what the `attach` backend needs.
 
+The variable carries either form, and `connect()` decides from its prefix:
+
+| value | transport |
+| --- | --- |
+| `127.0.0.1:34567` | loopback TCP — the ephemeral port the server bound |
+| `unix:/run/volucer/worker.0.sock` | a unix socket, from `socket = "unix:/run/volucer/worker"` |
+
+`volucer_worker.unix_path()` is the whole of the decision and returns `None` for a TCP address,
+so the connection code has one branch. `unix:` is the same convention the server's configuration
+uses for `external`, `attach` and the worker `socket` key, so there is one spelling rather than a
+fourth.
+
 ## Attaching instead of spawning
 
 The `worker` backend starts your process. The `attach` backend does not: it *dials* a relay
