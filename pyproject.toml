@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77 is the floor for the SPDX `license` field (PEP 639). Below it the field is a table, and
+# the table form is deprecated — so the floor is the version that removed the warning rather
+# than the oldest version that happens to work.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,17 +11,25 @@ version = "0.1.0"
 description = "A Python worker SDK for the volucer worker protocol"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP :: WSGI",
 ]
 
 [project.urls]
+Homepage = "https://github.com/sailantis/volucer-python-sdk"
+Documentation = "https://github.com/sailantis/volucer/blob/main/docs/worker-protocol.md"
 Specification = "https://github.com/sailantis/volucer/blob/main/docs/worker-protocol.md"
 Repository = "https://github.com/sailantis/volucer-python-sdk"
+Issues = "https://github.com/sailantis/volucer-python-sdk/issues"
 
 [tool.setuptools]
 packages = ["volucer_worker"]
