@@ -30,6 +30,12 @@ HTTP framing on the hot path.
 ## Install
 
 ```console
+pip install volucer-worker
+```
+
+Or, from a checkout:
+
+```console
 pip install git+https://github.com/sailantis/volucer-python-sdk
 ```
 
