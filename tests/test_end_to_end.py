@@ -140,8 +140,8 @@ class EndToEndTest(unittest.TestCase):
         config.write_text(
             "\n".join(
                 [
-                    'default_backend = "py"',
                     "[server]",
+                    'default_backend = "py"',
                     f'http = "127.0.0.1:{cls.port}"',
                     f'document_root = "{root.as_posix()}"',
                     'front_controller = "app.py"',
@@ -393,8 +393,8 @@ class AttachEndToEndTest(unittest.TestCase):
         config.write_text(
             "\n".join(
                 [
-                    'default_backend = "py"',
                     "[server]",
+                    'default_backend = "py"',
                     f'http = "127.0.0.1:{cls.port}"',
                     f'document_root = "{root.as_posix()}"',
                     'front_controller = "app.py"',
