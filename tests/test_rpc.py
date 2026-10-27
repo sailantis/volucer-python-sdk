@@ -28,8 +28,24 @@ from volucer_worker.rpc import Rpc, _address_of, _key
 
 
 def pair() -> tuple[socket.socket, socket.socket]:
-    """A connected pair of stream sockets: ``(client, server)``."""
-    client, server = socket.socketpair(socket.AF_INET, socket.SOCK_STREAM)
+    """A connected pair of stream sockets: ``(client, server)``.
+
+    **The family is chosen per platform, and both choices are forced.** Neither pair type exists
+    everywhere:
+
+    - ``AF_INET`` pairs are Linux-unsupported — ``socketpair(AF_INET, …)`` raises
+      ``OSError: [Errno 95] Operation not supported`` — which is how this test file first failed in
+      CI, having been written and run on Windows.
+    - ``AF_UNIX`` does not exist on Windows at all: ``socket`` has no ``AF_UNIX`` attribute, the
+      same gap that makes the PHP SDK's ``STREAM_PF_UNIX`` unavailable there.
+
+    So Windows gets an inet pair and everything else a unix one. The client cannot tell the
+    difference, which is the point of testing the transport rather than the network.
+    """
+    if hasattr(socket, "AF_UNIX"):
+        client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    else:
+        client, server = socket.socketpair(socket.AF_INET, socket.SOCK_STREAM)
     return client, server
 
 
