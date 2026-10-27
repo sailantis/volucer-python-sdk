@@ -22,18 +22,29 @@ jobs:
 
       - name: Unit and wire-format tests
         run: |
-          # Named explicitly rather than `discover`: the end-to-end module is run below, where a
-          # real server exists. Discovering it here is what made the failure unreadable --
-          # `VOLUCER_E2E` is not set in this step, so with no binary it *skipped*, and a skipped
-          # job looks exactly like a passing one.
+          # Named explicitly rather than `discover`: the end-to-end module is run by the `e2e`
+          # job below, where a real server exists. Discovering it here is what made the failure
+          # unreadable -- `VOLUCER_E2E` is not set in this step, so with no binary it *skipped*,
+          # and a skipped job looks exactly like a passing one.
           python -m unittest tests.test_wire_format tests.test_worker tests.test_wsgi tests.test_rpc -v
 
-      # The end-to-end suite drives a real server, and it is a separate job rather than a
-      # step so that a build failure is reported as itself. VOLUCER_E2E=1 is what makes a
-      # missing binary a failure rather than a skip: a skipped end-to-end test and a passing
-      # one are the same green, which is the reason the server's own CI sets it too.
+  # The end-to-end suite drives a real server, so it is its own job: a build failure is then
+  # reported as itself, and -- the reason it moved out of `test` -- it cannot be gated off by
+  # editing the matrix above. It used to be four steps inside `test` guarded by
+  # `if: matrix.python == '3.12'`. When the matrix became 3.10/3.13 the condition silently
+  # stopped matching, every job skipped those steps, and the workflow stayed green while proving
+  # nothing. A version pinned in a job that has no matrix cannot drift out of step with one.
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Check out the server beside the SDK
-        if: matrix.python == '3.12'
         uses: actions/checkout@v4
         with:
           repository: sailantis/volucer
@@ -43,15 +54,15 @@ jobs:
       # never installed them -- so the build step below could not have succeeded even if the
       # end-to-end suite had been reached. The set mirrors the server's own CI.
       - name: Install the server's build dependencies
-        if: matrix.python == '3.12'
         run: sudo apt-get update && sudo apt-get install -y nasm cmake build-essential
 
       - name: Build the server
-        if: matrix.python == '3.12'
         run: cargo build --manifest-path volucer/Cargo.toml
 
+      # VOLUCER_E2E=1 is what makes a missing binary a failure rather than a skip: a skipped
+      # end-to-end test and a passing one are the same green, which is the reason the server's
+      # own CI sets it too.
       - name: End-to-end against the real server
-        if: matrix.python == '3.12'
         run: |
           test -x "$PWD/volucer/target/debug/volucer" || {
             echo "the server did not build, so there is nothing for the suite to talk to"
