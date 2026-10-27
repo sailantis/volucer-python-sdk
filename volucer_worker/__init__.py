@@ -32,6 +32,7 @@ import sys
 from .message import Job, Request, Response
 from .protocol import ProtocolError
 from .worker import Worker, real_stdout, runtime, socket_address, unix_path
+from .rpc import Rpc
 from . import grpc, supervisor, wsgi
 
 __version__ = "0.1.0"
@@ -41,6 +42,7 @@ __all__ = [
     "ProtocolError",
     "Request",
     "Response",
+    "Rpc",
     "Worker",
     "grpc",
     "runtime",

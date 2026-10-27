@@ -26,7 +26,7 @@ jobs:
           # real server exists. Discovering it here is what made the failure unreadable --
           # `VOLUCER_E2E` is not set in this step, so with no binary it *skipped*, and a skipped
           # job looks exactly like a passing one.
-          python -m unittest tests.test_wire_format tests.test_worker tests.test_wsgi -v
+          python -m unittest tests.test_wire_format tests.test_worker tests.test_wsgi tests.test_rpc -v
 
       # The end-to-end suite drives a real server, and it is a separate job rather than a
       # step so that a build failure is reported as itself. VOLUCER_E2E=1 is what makes a

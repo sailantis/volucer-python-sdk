@@ -27,6 +27,11 @@ the plan recommends first. This SDK exists for the case where the worker channel
 what you want: the `kv`, `lock`, `jobs` and `metrics` services, recycling on RSS, and no
 HTTP framing on the hot path.
 
+**If you only want the services**, and `upstream` or `spawn_cgi` is the right shape for your
+deployment anyway, `Rpc` is the smaller answer: it reaches the same `kv`, `lock` and `jobs`
+over the `[rpc]` socket without turning the application into a worker. See
+[the call plane](#the-call-plane-for-an-application-that-is-not-a-worker).
+
 ## Install
 
 ```console
@@ -306,6 +311,52 @@ worker.run(handler)
 the big-endian length included. This SDK does not ship a protobuf encoder, because doing so
 would put a schema in the transport.
 
+## The call plane, for an application that is not a worker
+
+A worker asks for `kv`, `lock` and `jobs` with `CALL` frames on the stream that carries its
+requests. A FastCGI application has no such stream — it exists for the duration of one request
+and can only answer the frame it was handed — so volucer serves the same namespaces on a socket
+of its own, `[rpc]`, which `Rpc` dials:
+
+```python
+from volucer_worker import Rpc
+
+def application(environ, start_response):
+    # `environ` is the WSGI request's, and passing it is not optional — see below.
+    rpc = Rpc.connect(environ=environ)
+
+    rpc.kv("cache").set("greeting", "hello")
+    lock_id = rpc.lock().acquire("pdf:create")
+    rpc.queue("mail").push("SendEmail", {"to": "a@b"})
+```
+
+| Handle | Methods |
+| --- | --- |
+| `Rpc.connect(address?, token?, timeout?, environ?)` | Build one; nothing is dialled until the first call |
+| `rpc.kv(storage)` | `get`, `set`, `set_if_absent`, `has`, `delete`, `ttl`, `clear`, `get_multiple`, `get_many`, `set_multiple`, `serializer` |
+| `rpc.lock()` | `acquire`, `try_acquire`, `release`, `exists`, `holders`, `update_ttl` |
+| `rpc.queue(pipeline)` | `push(task, payload, headers)` |
+| `rpc.call(name, params)` | One raw round trip, for a method with no handle |
+| `rpc.last_error`, `rpc.last_call_was_unknown` | Why the last call failed, and whether it may have taken effect |
+
+**Pass `environ` from a WSGI application.** volucer puts the address in the CGI *request*, and the
+process the application runs in only receives `VOLUCER_FCGI_ADDRESS` — so a client reading
+`os.environ` works for a script started by hand and fails for every real request, with a message
+that blames the deployment. `Rpc.connect(environ=environ)` reads the right mapping; a CLI script
+or a worker omits it and gets `os.environ`, which is correct for both.
+
+Two things differ from a worker's channel and are worth knowing before relying on one. A call has
+a **deadline** (`Rpc.connect(timeout=…)`, default 10 s), because this reads a socket rather than a
+pipe — and a `lock.acquire` with a long `wait` needs a deadline that covers it, since
+`[rpc].call_timeout_seconds` governs only how long the *server* spends writing an answer.
+`last_call_was_unknown` is `True` only when the call may have been served: a refusal sets it
+`False`, so retrying is a decision rather than a gamble.
+
+`Kv` serializes with JSON by default and `serializer(encode, decode)` replaces that. The server
+holds opaque bytes and never sees your objects, which is what lets a value written by a PHP worker
+be read here — and `_decode_value` returns `bytes` rather than raising for anything that is not
+JSON, so one storage can be shared by two languages.
+
 ## Tests
 
 ```console
@@ -315,6 +366,12 @@ python -m unittest discover -s tests
 The wire-format tests assert the same frozen bytes as
 `crates/volucer-worker/tests/wire_format.rs` and `volucer-php-sdk/tests/WireFormatTest.php`,
 so all three cannot drift apart silently.
+
+`tests/test_rpc.py` drives `Rpc` over a `socket.socketpair`, and asserts on the **bytes the client
+writes** — a batch key is base64, a value is its JSON encoding and then base64, a push carries its
+task. The server's half of that contract is
+`a_batch_key_is_base64_in_both_directions` in the Rust suite, and the two disagreed for three
+releases because neither side had a test for the batch methods.
 
 The end-to-end test drives a real `volucer` binary and is skipped unless one is found:
 
@@ -345,3 +402,8 @@ are the same green.
 - **Forking on Windows.** `supervisor.serve()` needs `os.fork()`. The platform without it is
   served by `kind = "worker"` or `kind = "upstream"`, and the end-to-end suite proves the
   `attach` contract on Windows with a threaded supervisor instead.
+
+`Rpc` is the one part that does not need the worker channel at all, so a Django or Flask
+application under `spawn_cgi` gets the same `kv`, `lock` and `jobs` a worker does without being one.
+That is the option to reach for when `upstream` is the right deployment shape but the application
+still needs a cache and a lock.
