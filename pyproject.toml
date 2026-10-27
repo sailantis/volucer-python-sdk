@@ -13,6 +13,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+# A name only, no address: this becomes permanent public metadata, and an email here is
+# scraped forever. It is what the project page shows as "Author", which is otherwise blank --
+# the PyPI *account* username (which appears as "maintained by") is a different field and is
+# not the one a visitor reads as credit.
+authors = [{ name = "Sailantis" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
