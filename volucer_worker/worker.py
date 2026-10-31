@@ -419,6 +419,13 @@ class Worker:
                 "pid": os.getpid(),
                 "runtime": runtime(),
                 "no_checksum": offer,
+                # **This SDK can read a body whose length it was not told.** The server only
+                # sends a REQUEST without `body_len` to a worker that says so here, because the
+                # alternative is worse than a missing feature: an SDK that predates the field
+                # reads an absent length as 0, concludes there is nothing to read, and then takes
+                # the first BODY frame for its own response. One absent key would desynchronise
+                # every request, so the party that has to cope is the one that advertises.
+                "stream_request_body": True,
             },
         )
 
@@ -533,7 +540,10 @@ class Worker:
         self._keep_alive = True
 
         metadata = protocol.decode_json(payload, "a REQUEST header")
-        body = self._read_body(header.request_id, int(metadata.get("body_len", 0)))
+        # `None` means the server did not declare a length: the body is streamed and `LAST` is the
+        # only end signal. Keeping that distinct from an explicit `0` — a correctly empty body — is
+        # what makes the streamed case readable at all.
+        body = self._read_body(header.request_id, _optional_int(metadata, "body_len"))
 
         request = Request(
             method=str(metadata.get("method", "GET")),
@@ -569,22 +579,30 @@ class Worker:
         duration_us = int((time.perf_counter() - started) * 1_000_000)
         self._respond(response, app_status, duration_us)
 
-    def _read_body(self, request_id: int, body_len: int) -> bytes:
+    def _read_body(self, request_id: int, body_len: int | None) -> bytes:
         """Read the request body from the BODY frames that follow a REQUEST.
 
         Stops at `body_len` bytes, because the declared length is authoritative. A frame
         flagged LAST that arrives early means the sender and this reader disagree about the
         length, which is worth failing on rather than papering over: the rest of the stream
         cannot be trusted after that.
+
+        `body_len` is ``None`` when the server did not declare one, which is how it says "this body
+        is streamed and its length is unknown". Then `LAST` is the *only* end signal, so the loop
+        reads until it sees one rather than counting.
         """
         if body_len == 0:
             return b""
 
         chunks: list[bytes] = []
         received = 0
-        while received < body_len:
+        while body_len is None or received < body_len:
             header = self.read_header()
             if header is None:
+                if body_len is None:
+                    raise ProtocolError(
+                        "the server closed the pipe in the middle of a streamed request body"
+                    )
                 raise ProtocolError(
                     f"the server closed the pipe after {received} of {body_len} body bytes"
                 )
@@ -605,6 +623,13 @@ class Worker:
 
             chunks.append(payload)
             received += len(payload)
+
+            if body_len is None:
+                # Checked after the payload is kept, so a final frame that also carried the last
+                # bytes of the body is not dropped.
+                if header.is_last:
+                    break
+                continue
 
             if header.is_last and received != body_len:
                 raise ProtocolError(
@@ -963,6 +988,24 @@ def _pairs(value: Any) -> list[tuple[str, str]]:
             continue
         pairs.append((str(pair[0]), str(pair[1])))
     return pairs
+
+
+def _optional_int(data: dict[str, Any], key: str) -> int | None:
+    """An integer field that is genuinely absent when the key is missing.
+
+    ``None`` and ``0`` mean different things on the wire and must keep doing so: a ``body_len`` of
+    ``0`` is a correctly empty body, while an absent one means "the length is unknown, the body ends
+    at LAST". Folding the two together with a ``0`` default is how a streamed request would be read
+    as an empty one — and then the next frame the reader saw would be the *response* it was waiting
+    for, desynchronising every subsequent request.
+    """
+    if key not in data:
+        return None
+    value = data[key]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalise(result: Any) -> Response:

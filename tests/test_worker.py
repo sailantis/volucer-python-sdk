@@ -88,6 +88,42 @@ class Channel:
                 )
         return self
 
+    def streamed_request(self, request_id: int, pieces: list[bytes]) -> "Channel":
+        """A REQUEST whose body has **no declared length**, terminated by `LAST`.
+
+        This is what the server sends to a worker that advertised `stream_request_body`: the size
+        is unknown when the head goes out, so `body_len` is omitted entirely and `LAST` is the only
+        end signal.
+        """
+        self._write(
+            protocol.Frame(
+                protocol.REQUEST,
+                request_id,
+                protocol.json_bytes(
+                    {
+                        "method": "POST",
+                        "uri": "/upload",
+                        "protocol": "HTTP/1.1",
+                        "headers": [["Content-Type", "application/octet-stream"]],
+                        "remote_addr": "127.0.0.1",
+                        # No `body_len` key at all.
+                        "script_filename": "/srv/app.py",
+                        "https": False,
+                    }
+                ),
+            ).encode()
+        )
+        for index, piece in enumerate(pieces):
+            self._write(
+                protocol.Frame(
+                    protocol.BODY,
+                    request_id,
+                    piece,
+                    protocol.FLAG_LAST if index == len(pieces) - 1 else 0,
+                ).encode()
+            )
+        return self
+
     def job(self, request_id: int, *, body: bytes = b"", attempts: int = 0) -> "Channel":
         self._write(
             protocol.Frame(
@@ -176,6 +212,19 @@ class HandshakeTest(unittest.TestCase):
         self.assertFalse(worker._checksum)
         self.assertTrue(channel.by_type(protocol.HELLO_ACK)[0][1]["no_checksum"])
 
+    def test_the_ack_advertises_that_a_streamed_body_can_be_read(self) -> None:
+        # The server only sends a REQUEST with no `body_len` to a worker that says so here. An SDK
+        # that predates the field would read an absent length as 0 and take the first BODY frame
+        # for its own response, so the party that has to cope is the one that advertises.
+        channel = Channel().hello()
+        worker = worker_for(channel)
+        worker.handshake()
+
+        self.assertIs(
+            True,
+            channel.by_type(protocol.HELLO_ACK)[0][1]["stream_request_body"],
+        )
+
     def test_a_hello_with_the_wrong_version_is_refused(self) -> None:
         channel = Channel()
         channel.to_worker.write(
@@ -254,6 +303,52 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(17, len(bodies[2][1]))
         self.assertEqual([False, False, True], [header.is_last for header, _ in bodies])
         self.assertEqual(payload, b"".join(data for _, data in bodies))
+
+    def test_a_streamed_body_arrives_whole_and_in_order(self) -> None:
+        channel = Channel().hello().streamed_request(1, [b"first-", b"second-", b"third"])
+        seen: list[bytes] = []
+
+        def handler(request, worker):
+            seen.append(request.body)
+            return Response.text("ok")
+
+        self.run_one(channel, handler)
+        self.assertEqual([b"first-second-third"], seen)
+
+    def test_a_streamed_body_with_no_frames_is_empty_not_a_deadlock(self) -> None:
+        # The terminator is an empty LAST frame. A reader that waited for a non-empty one would
+        # hang until the pool killed the worker.
+        channel = Channel().hello().streamed_request(1, [b""])
+        seen: list[bytes] = []
+        self.run_one(channel, lambda request, worker: seen.append(request.body) or Response.text("ok"))
+        self.assertEqual([b""], seen)
+
+    def test_a_declared_length_is_still_authoritative(self) -> None:
+        # Streaming did not weaken the old rule: a body that ends before its declared length is a
+        # protocol error, not a short body accepted as complete.
+        channel = Channel()
+        channel.hello()
+        channel._write(
+            protocol.Frame(
+                protocol.REQUEST,
+                1,
+                protocol.json_bytes(
+                    {
+                        "method": "POST",
+                        "uri": "/",
+                        "headers": [],
+                        "remote_addr": "127.0.0.1",
+                        "body_len": 10,
+                        "script_filename": "/srv/app.py",
+                        "https": False,
+                    }
+                ),
+            ).encode()
+        )
+        channel._write(protocol.Frame(protocol.BODY, 1, b"abc", protocol.FLAG_LAST).encode())
+
+        with self.assertRaises(protocol.ProtocolError):
+            self.run_one(channel, lambda request, worker: Response.text("x"))
 
     def test_a_handler_that_raises_answers_500_and_reports_the_status(self) -> None:
         channel = Channel().hello().request(1)
