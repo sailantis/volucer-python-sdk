@@ -465,7 +465,7 @@ class Worker:
         What the handler returns decides the job's fate, and the three answers are the
         protocol's three outcomes:
 
-        * ``None`` — **acknowledge.** Done.
+        * Anything except ``False`` or a ``str`` — **acknowledge.** Done.
         * ``False` — **requeue.** Not done, and it should be handed out again.
         * a ``str`` — **reject**, with that string as the reason. Done with, not coming back.
 

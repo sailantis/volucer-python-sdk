@@ -236,6 +236,23 @@ The `makefile` calls are not optional — a `socket` has neither `read` nor `wri
 what the worker calls on its streams. Passing the raw socket, as a PHP worker can with its
 file-like streams, fails with `AttributeError`.
 
+### Consuming jobs
+
+The attach supervisor above serves HTTP with `Worker.run()`; it does not consume jobs. A job
+consumer is a separate process started by Volucer through `[jobs.pool]`. Its entry point uses
+`Worker.connect().consume(handler)`, not `supervisor.serve()`:
+
+```toml
+[jobs]
+consume = ["emails"]
+
+[jobs.pool]
+command = "python consumer.py"
+workers = 4
+```
+
+See the Volucer [job-pool configuration](https://github.com/sailantis/volucer/blob/main/docs/08-SERVICES.md#configuring-the-server-side).
+
 ## Django
 
 Django is a WSGI application, so there is nothing to adapt — `get_wsgi_application()` is the
@@ -358,7 +375,7 @@ worker that does not report is one the pool never recycles on memory — see
 | Frame | Handler surface |
 | --- | --- |
 | `REQUEST` / `RESPONSE` / `BODY` / `END` | `Worker.run(handler)`; the handler returns a `Response`, `bytes`, `str`, a `(status, headers, body)` tuple, or `None` |
-| `JOB` / `ACK` | `Worker.consume(handler)`; `None` acknowledges, `False` requeues, a `str` rejects with a reason, and a raise requeues |
+| `JOB` / `ACK` | `Worker.consume(handler)`; anything except `False` or a `str` acknowledges, `False` requeues, a `str` rejects with a reason, and a raise requeues |
 | `CALL` / `RETURN` | `Worker.call(name, params)` from inside a handler; `Worker.on_call(handler)` answers the server's calls |
 | `LOG` / `METRIC` | `Worker.emit_log(...)`, `Worker.emit_metric(...)` |
 | `CONTROL` | Answered by the SDK; `drain` and `shutdown` stop the loop |
